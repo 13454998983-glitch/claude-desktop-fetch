@@ -1,0 +1,26 @@
+name: Fetch Claude Desktop Installer
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Claude Desktop Windows installer
+        run: |
+          # Follow the redirect to get the actual binary
+          curl -L -o Claude-Setup-x64.msix \
+            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
+            "https://claude.ai/api/desktop/win32/x64/setup/latest/redirect"
+          
+          ls -lh Claude-Setup-x64.msix
+          file Claude-Setup-x64.msix || true
+          echo "Download complete"
+          
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeDesktop-Installer
+          path: Claude-Setup-x64.msix
+          retention-days: 7
