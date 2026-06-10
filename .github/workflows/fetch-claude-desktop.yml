@@ -10,84 +10,77 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20' }
       
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          
       - name: Install Playwright
         run: |
           npm init -y
           npm install playwright
           npx playwright install chromium
           
-      - name: Download Claude Desktop MSIX
+      - name: Download MSIX
         run: |
-          cat > dl.js << 'EOF'
+          cat > dl.cjs << 'EOF'
           const { chromium } = require('playwright');
-          const fs = require('fs');
-          const path = require('path');
+          const fs = require('fs'), path = require('path');
           (async () => {
             const browser = await chromium.launch({ headless: true });
-            const context = await browser.newContext({
+            const ctx = await browser.newContext({
               userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
               acceptDownloads: true
             });
-            const page = await context.newPage();
+            const page = await ctx.newPage();
             
-            const dlPromise = new Promise((resolve, reject) => {
-              const t = setTimeout(() => reject(new Error('timeout')), 120000);
+            let dlPath = null;
+            const dlPromise = new Promise((resolve) => {
               page.on('download', async (dl) => {
-                clearTimeout(t);
                 const fp = path.join(process.cwd(), dl.suggestedFilename());
                 await dl.saveAs(fp);
-                console.log('Size:', fs.statSync(fp).size);
+                dlPath = fp;
                 resolve(fp);
               });
             });
             
-            await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
-            const btn = await page.$('[data-app-download="win-x64"] a');
-            if (!btn) { console.log('No button found'); process.exit(1); }
-            const href = await btn.getAttribute('href');
-            console.log('MSIX URL:', href);
+            const href = 'https://claude.ai/api/desktop/win32/x64/setup/latest/redirect';
             await page.goto(href, { timeout: 30000 }).catch(() => {});
             
-            await dlPromise;
+            // Wait up to 10 minutes for download
+            await Promise.race([dlPromise, new Promise(r => setTimeout(r, 600000))]);
             await browser.close();
             
-            // Verify we have the MSIX
-            const files = fs.readdirSync('.').filter(f => f.endsWith('.msix'));
-            console.log('Files:', files);
-            files.forEach(f => console.log(f, fs.statSync(f).size, 'bytes'));
+            if (dlPath) {
+              const s = fs.statSync(dlPath).size;
+              console.log('FILE:', dlPath, s, 'bytes');
+              if (s > 50000000) console.log('OK');
+              else console.log('TOO_SMALL');
+            } else {
+              console.log('NO_DOWNLOAD');
+              process.exit(1);
+            }
           })();
           EOF
-          node dl.js
-          
-      - name: Split MSIX into parts
-        run: |
-          MSIX=$(ls *.msix | head -1)
-          echo "Splitting $MSIX ($(stat -c%s $MSIX) bytes)"
-          split -b 50M -d "$MSIX" claude-msix-part-
-          ls -lh claude-msix-part-*
+          node dl.cjs
           
       - name: Upload to transfer.sh
         run: |
-          MSIX=$(ls *.msix | head -1)
-          echo "Uploading to transfer.sh..."
-          curl --upload-file "$MSIX" https://transfer.sh/Claude.msix -v 2>&1 | tee transfer-url.txt
-          echo "Transfer URL:"
-          cat transfer-url.txt
+          for f in *.msix *.exe; do
+            [ -f "$f" ] || continue
+            sz=$(stat -c%s "$f")
+            echo "Uploading $f ($sz bytes) to transfer.sh..."
+            curl --upload-file "$f" "https://transfer.sh/$f" -v 2>&1 | tee -a transfer-urls.txt
+            echo "---" >> transfer-urls.txt
+          done
+          cat transfer-urls.txt
           
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: claude-installer
-          name: Claude Desktop MSIX
+          name: Claude Desktop
           files: |
             *.msix
-            transfer-url.txt
+            transfer-urls.txt
           draft: false
           prerelease: false
           fail_on_unmatched_files: false
