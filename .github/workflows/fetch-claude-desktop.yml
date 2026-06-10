@@ -7,20 +7,91 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Download Claude Desktop Windows installer
-        run: |
-          # Follow the redirect to get the actual binary
-          curl -L -o Claude-Setup-x64.msix \
-            -H "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" \
-            "https://claude.ai/api/desktop/win32/x64/setup/latest/redirect"
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
           
-          ls -lh Claude-Setup-x64.msix
-          file Claude-Setup-x64.msix || true
-          echo "Download complete"
+      - name: Install Playwright
+        run: |
+          npm init -y
+          npm install playwright
+          npx playwright install chromium
+          
+      - name: Download Claude Desktop via browser
+        run: |
+          cat > download.js << 'EOF'
+          const { chromium } = require('playwright');
+          const fs = require('fs');
+          const path = require('path');
+          
+          (async () => {
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({
+              userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+            });
+            const page = await context.newPage();
+            
+            // Navigate to the redirect URL
+            const redirectUrl = 'https://claude.ai/api/desktop/win32/x64/setup/latest/redirect';
+            
+            const downloadPromise = page.waitForEvent('download', { timeout: 60000 });
+            await page.goto(redirectUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            
+            try {
+              const download = await downloadPromise;
+              const filePath = path.join(process.cwd(), download.suggestedFilename() || 'Claude-Setup-x64.msix');
+              await download.saveAs(filePath);
+              console.log(`Downloaded: ${filePath} (${fs.statSync(filePath).size} bytes)`);
+            } catch (e) {
+              console.log(`No download triggered: ${e.message}`);
+              console.log('Page title:', await page.title());
+              console.log('Page URL:', page.url());
+              
+              // Try to find download links on the page
+              const links = await page.evaluate(() => {
+                return Array.from(document.querySelectorAll('a[href]')).map(a => ({
+                  text: a.textContent?.trim()?.substring(0, 50),
+                  href: a.href?.substring(0, 100)
+                })).filter(l => l.href.includes('download') || l.href.includes('setup') || l.href.includes('msix') || l.href.includes('exe'));
+              });
+              console.log('Download links:', JSON.stringify(links, null, 2));
+              
+              // Try the download page
+              await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
+              console.log('Download page title:', await page.title());
+              console.log('Download page URL:', page.url());
+              
+              // Click the Windows download button if found
+              const winBtn = await page.$('[data-app-download="win-x64"] a, a[href*="win32"]');
+              if (winBtn) {
+                const dlPromise = page.waitForEvent('download', { timeout: 30000 });
+                await winBtn.click();
+                const dl = await dlPromise;
+                const fpath = path.join(process.cwd(), dl.suggestedFilename() || 'Claude-Setup-x64.msix');
+                await dl.saveAs(fpath);
+                console.log(`Downloaded via button: ${fpath} (${fs.statSync(fpath).size} bytes)`);
+              }
+            }
+            
+            await browser.close();
+            
+            // List downloaded files
+            const files = fs.readdirSync(process.cwd()).filter(f => f.endsWith('.msix') || f.endsWith('.exe') || f.endsWith('.dmg'));
+            console.log('MSIX/EXE files:', files);
+            files.forEach(f => console.log(`  ${f}: ${fs.statSync(f).size} bytes`));
+          })();
+          EOF
+          
+          node download.js
           
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ClaudeDesktop-Installer
-          path: Claude-Setup-x64.msix
+          path: |
+            *.msix
+            *.exe
           retention-days: 7
