@@ -6,6 +6,8 @@ on:
 jobs:
   fetch:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       
@@ -36,79 +38,43 @@ jobs:
             const page = await context.newPage();
             
             const redirectUrl = 'https://claude.ai/api/desktop/win32/x64/setup/latest/redirect';
-            
-            // Set up download handler BEFORE navigation
             let downloadPath = null;
+            
             const downloadPromise = new Promise((resolve, reject) => {
-              const timeout = setTimeout(() => reject(new Error('Download timeout')), 120000);
+              setTimeout(() => reject(new Error('Download timeout')), 120000);
               page.on('download', async (download) => {
-                clearTimeout(timeout);
-                const fname = download.suggestedFilename() || 'Claude-Setup-x64.msix';
+                const fname = download.suggestedFilename() || 'Claude-Setup-x64.exe';
                 const fpath = path.join(process.cwd(), fname);
                 await download.saveAs(fpath);
+                const size = fs.statSync(fpath).size;
+                console.log(`Downloaded: ${fname} = ${(size/1024/1024).toFixed(1)} MB`);
                 downloadPath = fpath;
-                console.log(`Download saved: ${fpath} (${fs.statSync(fpath).size} bytes)`);
                 resolve(fpath);
               });
             });
             
-            // Navigate - the download will be triggered automatically
             try {
               await page.goto(redirectUrl, { timeout: 30000 });
             } catch (e) {
               if (e.message && e.message.includes('Download is starting')) {
                 console.log('Download triggered (expected)');
-              } else {
-                console.log('Navigation error:', e.message);
               }
             }
             
-            // Wait for download to complete
-            try {
-              await downloadPromise;
-            } catch (e) {
-              console.log('Download error:', e.message);
-              
-              // Fallback: try the download page
-              console.log('Trying download page fallback...');
-              await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
-              console.log('Page title:', await page.title());
-              console.log('Page URL:', page.url());
-              
-              const winBtn = await page.$('[data-app-download="win-x64"] a, a[href*="win32"]');
-              if (winBtn) {
-                console.log('Found Windows download button, clicking...');
-                const dlFallback = new Promise((res, rej) => {
-                  setTimeout(() => rej(new Error('fallback download timeout')), 60000);
-                  page.on('download', async (dl) => {
-                    const fn = dl.suggestedFilename() || 'Claude-Setup-x64.msix';
-                    const fp = path.join(process.cwd(), fn);
-                    await dl.saveAs(fp);
-                    console.log(`Fallback download: ${fp} (${fs.statSync(fp).size} bytes)`);
-                    res(fp);
-                  });
-                });
-                await winBtn.click();
-                await dlFallback;
-              }
-            }
-            
+            try { await downloadPromise; } catch (e) { console.log('Download error:', e.message); }
             await browser.close();
-            
-            // List all downloads
-            const files = fs.readdirSync(process.cwd()).filter(f => f.endsWith('.msix') || f.endsWith('.exe'));
-            console.log('All MSIX/EXE files:', JSON.stringify(files));
-            files.forEach(f => console.log(`  ${f}: ${(fs.statSync(f).size / 1024 / 1024).toFixed(1)} MB`));
           })();
           ENDOFSCRIPT
           
           node download.js
           
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - name: Create Release and Upload
+        uses: softprops/action-gh-release@v1
         with:
-          name: ClaudeDesktop-Installer
-          path: |
-            *.msix
+          tag_name: claude-installer
+          name: Claude Desktop Installer
+          files: |
             *.exe
-          retention-days: 7
+            *.msix
+          draft: false
+          prerelease: false
