@@ -15,15 +15,16 @@ jobs:
       
       - name: Install Playwright
         run: |
-          npm init -y
-          npm install playwright
-          npx playwright install chromium
+          npm init -y 2>/dev/null
+          npm install playwright 2>/dev/null
+          npx playwright install chromium 2>/dev/null
           
       - name: Download MSIX
         run: |
-          cat > dl.cjs << 'EOF'
+          cat > dl.cjs << 'ENDOFSCRIPT'
           const { chromium } = require('playwright');
           const fs = require('fs'), path = require('path');
+          
           (async () => {
             const browser = await chromium.launch({ headless: true });
             const ctx = await browser.newContext({
@@ -32,55 +33,78 @@ jobs:
             });
             const page = await ctx.newPage();
             
-            let dlPath = null;
-            const dlPromise = new Promise((resolve) => {
-              page.on('download', async (dl) => {
-                const fp = path.join(process.cwd(), dl.suggestedFilename());
-                await dl.saveAs(fp);
-                dlPath = fp;
-                resolve(fp);
-              });
+            // Collect all downloads - keep the largest file (MSIX)
+            const downloads = [];
+            page.on('download', async (dl) => {
+              const fp = path.join(process.cwd(), dl.suggestedFilename());
+              await dl.saveAs(fp);
+              downloads.push(fp);
+              console.log('DOWNLOAD:', fp, fs.statSync(fp).size, 'bytes');
             });
             
-            const href = 'https://claude.ai/api/desktop/win32/x64/setup/latest/redirect';
-            await page.goto(href, { timeout: 30000 }).catch(() => {});
+            // Go to download page - triggers both EXE and MSIX
+            await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
+            console.log('Page loaded:', page.url());
             
-            // Wait up to 10 minutes for download
-            await Promise.race([dlPromise, new Promise(r => setTimeout(r, 600000))]);
+            // Click Windows x64 button
+            const btn = await page.$('[data-app-download="win-x64"] a');
+            if (!btn) {
+              console.log('No Windows button found! Dumping page buttons...');
+              const allBtns = await page.evaluate(() => 
+                Array.from(document.querySelectorAll('[data-app-download] a')).map(a => ({
+                  platform: a.closest('[data-app-download]')?.getAttribute('data-app-download'),
+                  href: a.href
+                }))
+              );
+              console.log(JSON.stringify(allBtns));
+              process.exit(1);
+            }
+            
+            const href = await btn.getAttribute('href');
+            console.log('Button href:', href);
+            
+            // Navigate to trigger download
+            await page.goto(href, { timeout: 30000 }).catch(() => console.log('Nav done (download started)'));
+            
+            // Wait for downloads to complete (up to 10 min)
+            await new Promise(r => setTimeout(r, 600000));
             await browser.close();
             
-            if (dlPath) {
-              const s = fs.statSync(dlPath).size;
-              console.log('FILE:', dlPath, s, 'bytes');
-              if (s > 50000000) console.log('OK');
-              else console.log('TOO_SMALL');
-            } else {
-              console.log('NO_DOWNLOAD');
+            // Report results
+            console.log('\n=== FINAL FILES ===');
+            const msixFiles = fs.readdirSync('.').filter(f => f.endsWith('.msix'));
+            const exeFiles = fs.readdirSync('.').filter(f => f.endsWith('.exe'));
+            
+            console.log('MSIX files:', msixFiles.map(f => `${f}=${(fs.statSync(f).size/1024/1024).toFixed(1)}MB`));
+            console.log('EXE files:', exeFiles.map(f => `${f}=${(fs.statSync(f).size/1024/1024).toFixed(1)}MB`));
+            
+            if (msixFiles.length === 0) {
+              console.log('NO MSIX FOUND - listing all files:');
+              fs.readdirSync('.').forEach(f => console.log(`  ${f}: ${fs.statSync(f).size}`));
               process.exit(1);
             }
           })();
-          EOF
+          ENDOFSCRIPT
           node dl.cjs
           
       - name: Upload to transfer.sh
         run: |
-          for f in *.msix *.exe; do
+          for f in *.msix; do
             [ -f "$f" ] || continue
-            sz=$(stat -c%s "$f")
-            echo "Uploading $f ($sz bytes) to transfer.sh..."
-            curl --upload-file "$f" "https://transfer.sh/$f" -v 2>&1 | tee -a transfer-urls.txt
-            echo "---" >> transfer-urls.txt
+            echo "Uploading $f ($(stat -c%s $f) bytes)..."
+            curl --upload-file "$f" "https://transfer.sh/$f" 2>&1 | tee transfer-url.txt
+            echo "---"
           done
-          cat transfer-urls.txt
           
       - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: claude-installer
-          name: Claude Desktop
+          name: Claude Desktop MSIX
           files: |
             *.msix
-            transfer-urls.txt
+            transfer-url.txt
+            *.exe
           draft: false
           prerelease: false
           fail_on_unmatched_files: false
