@@ -1,4 +1,4 @@
-name: Fetch Claude Desktop Installer
+name: Fetch Claude Desktop MSIX
 
 on:
   workflow_dispatch:
@@ -24,11 +24,10 @@ jobs:
           
       - name: Download Claude Desktop MSIX
         run: |
-          cat > download.js << 'ENDOFSCRIPT'
+          cat > dl.js << 'EOF'
           const { chromium } = require('playwright');
           const fs = require('fs');
           const path = require('path');
-          
           (async () => {
             const browser = await chromium.launch({ headless: true });
             const context = await browser.newContext({
@@ -37,113 +36,58 @@ jobs:
             });
             const page = await context.newPage();
             
-            // Approach 1: Try known MSIX download URLs
-            const msixUrls = [
-              'https://claude.ai/api/desktop/win32/x64/msix/latest/redirect',
-              'https://claude.ai/api/desktop/win32/x64/setup/latest/redirect',
-            ];
-            
-            for (const url of msixUrls) {
-              console.log(`\n=== Trying: ${url} ===`);
-              let downloaded = false;
-              
-              const dlPromise = new Promise((resolve) => {
-                const timeout = setTimeout(() => resolve(null), 30000);
-                page.on('download', async (dl) => {
-                  clearTimeout(timeout);
-                  const fname = dl.suggestedFilename();
-                  const fpath = path.join(process.cwd(), fname);
-                  await dl.saveAs(fpath);
-                  const size = fs.statSync(fpath).size;
-                  console.log(`  -> ${fname}: ${(size/1024/1024).toFixed(1)} MB`);
-                  if (size > 50000000) { // > 50MB = likely real installer
-                    downloaded = true;
-                    resolve(fpath);
-                  }
-                });
+            const dlPromise = new Promise((resolve, reject) => {
+              const t = setTimeout(() => reject(new Error('timeout')), 120000);
+              page.on('download', async (dl) => {
+                clearTimeout(t);
+                const fp = path.join(process.cwd(), dl.suggestedFilename());
+                await dl.saveAs(fp);
+                console.log('Size:', fs.statSync(fp).size);
+                resolve(fp);
               });
-              
-              try {
-                await page.goto(url, { timeout: 15000 });
-              } catch (e) {
-                if (!e.message.includes('Download is starting')) {
-                  console.log(`  Navigation error: ${e.message.substring(0,80)}`);
-                }
-              }
-              
-              await dlPromise;
-              if (downloaded) break;
-            }
-            
-            // Approach 2: Try the download page with button clicking
-            console.log('\n=== Approach 2: Download page ===');
-            await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
-            console.log('Page URL:', page.url());
-            
-            // Find all download elements
-            const allDownloads = await page.evaluate(() => {
-              return Array.from(document.querySelectorAll('[data-app-download]')).map(el => ({
-                platform: el.getAttribute('data-app-download'),
-                links: Array.from(el.querySelectorAll('a')).map(a => ({
-                  href: a.href?.substring(0, 120),
-                  text: a.textContent?.trim()?.substring(0, 40)
-                }))
-              }));
             });
-            console.log('Download elements:', JSON.stringify(allDownloads, null, 2));
             
-            // Click Windows x64 MSIX button
-            const msixBtn = await page.$('[data-app-download="win-x64"] a');
-            if (msixBtn) {
-              const href = await msixBtn.getAttribute('href');
-              console.log('MSIX button href:', href);
-              
-              // Try navigating directly to the href
-              if (href && href.includes('redirect')) {
-                console.log('Following MSIX redirect link...');
-                const dlPromise = new Promise((resolve) => {
-                  setTimeout(() => resolve(null), 60000);
-                  page.on('download', async (dl) => {
-                    const fn = dl.suggestedFilename();
-                    const fp = path.join(process.cwd(), fn);
-                    await dl.saveAs(fp);
-                    console.log(`MSIX download: ${fn} = ${(fs.statSync(fp).size/1024/1024).toFixed(1)} MB`);
-                    resolve(fp);
-                  });
-                });
-                try {
-                  await page.goto(href, { timeout: 30000 });
-                } catch (e) {
-                  if (!e.message.includes('Download is starting')) {
-                    console.log('MSIX nav error:', e.message.substring(0, 80));
-                  }
-                }
-                await dlPromise;
-              }
-            }
+            await page.goto('https://claude.com/download', { waitUntil: 'networkidle', timeout: 30000 });
+            const btn = await page.$('[data-app-download="win-x64"] a');
+            if (!btn) { console.log('No button found'); process.exit(1); }
+            const href = await btn.getAttribute('href');
+            console.log('MSIX URL:', href);
+            await page.goto(href, { timeout: 30000 }).catch(() => {});
             
+            await dlPromise;
             await browser.close();
             
-            // List all downloads
-            console.log('\n=== All downloads ===');
-            ['exe','msix','dmg','zip'].forEach(ext => {
-              fs.readdirSync(process.cwd()).filter(f => f.toLowerCase().endsWith('.'+ext)).forEach(f => {
-                console.log(`  ${f}: ${(fs.statSync(f).size/1024/1024).toFixed(1)} MB`);
-              });
-            });
+            // Verify we have the MSIX
+            const files = fs.readdirSync('.').filter(f => f.endsWith('.msix'));
+            console.log('Files:', files);
+            files.forEach(f => console.log(f, fs.statSync(f).size, 'bytes'));
           })();
-          ENDOFSCRIPT
+          EOF
+          node dl.js
           
-          node download.js
+      - name: Split MSIX into parts
+        run: |
+          MSIX=$(ls *.msix | head -1)
+          echo "Splitting $MSIX ($(stat -c%s $MSIX) bytes)"
+          split -b 50M -d "$MSIX" claude-msix-part-
+          ls -lh claude-msix-part-*
           
-      - name: Create Release and Upload
+      - name: Upload to transfer.sh
+        run: |
+          MSIX=$(ls *.msix | head -1)
+          echo "Uploading to transfer.sh..."
+          curl --upload-file "$MSIX" https://transfer.sh/Claude.msix -v 2>&1 | tee transfer-url.txt
+          echo "Transfer URL:"
+          cat transfer-url.txt
+          
+      - name: Upload to GitHub Release
         uses: softprops/action-gh-release@v1
         with:
           tag_name: claude-installer
-          name: Claude Desktop Installer
+          name: Claude Desktop MSIX
           files: |
-            *.exe
             *.msix
+            transfer-url.txt
           draft: false
           prerelease: false
           fail_on_unmatched_files: false
